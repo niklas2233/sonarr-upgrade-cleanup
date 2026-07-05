@@ -4,7 +4,9 @@ Automatically deletes the old torrent (and its files) from qBittorrent when Sona
 
 ## How it works
 
-When Sonarr upgrades an episode, it calls this script. The script queries Sonarr's history API to find the previous torrent hash for that episode, then deletes it from qBittorrent.
+When Sonarr upgrades an episode, it calls this script. The script queries Sonarr's history API to find the torrent the old file was imported from, then deletes it from qBittorrent.
+
+**Season packs:** if the old torrent is a multi-episode pack that other episodes still depend on, it is left seeding. It only gets deleted once the last episode from it has been upgraded.
 
 ## Requirements
 

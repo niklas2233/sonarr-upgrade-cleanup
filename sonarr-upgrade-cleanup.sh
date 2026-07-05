@@ -34,20 +34,43 @@ HISTORY=$(curl -sf \
     -H "X-Api-Key: $SONARR_API_KEY" \
     "$SONARR_URL/api/v3/history?episodeId=$EPISODE_ID&pageSize=20&sortKey=date&sortDir=desc")
 
+# Most recent import that isn't the new download = the torrent the old file
+# came from. Keep original case for Sonarr queries; qBittorrent wants lowercase.
 OLD_HASH=$(echo "$HISTORY" | jq -r --arg new "$NEW_HASH" '
-    .records
-    | map(select(.eventType == "grabbed" and .downloadId != null))
-    | map(.downloadId |= ascii_downcase)
-    | map(select(.downloadId != $new))
-    | first
+    first(.records[]
+        | select(.eventType == "downloadFolderImported" and .downloadId != null)
+        | select((.downloadId | ascii_downcase) != $new))
     | .downloadId // empty')
 
 if [ -z "$OLD_HASH" ]; then
-    log "No previous grab found in Sonarr history for episode $EPISODE_ID"
+    log "No previous import found in Sonarr history for episode $EPISODE_ID"
     exit 0
 fi
 
-log "Old torrent hash: $OLD_HASH — deleting from qBittorrent"
+OLD_HASH_LC=$(echo "$OLD_HASH" | tr '[:upper:]' '[:lower:]')
+
+# Season pack guard: if any other episode's current file still comes from
+# the old torrent, leave it alone. It gets deleted when the last one upgrades.
+PACK_EPS=$(curl -sf -H "X-Api-Key: $SONARR_API_KEY" \
+    "$SONARR_URL/api/v3/history?downloadId=$OLD_HASH&pageSize=500" | jq -r '
+    [.records[] | select(.eventType == "downloadFolderImported") | .episodeId]
+    | unique | .[]')
+
+for ep in $PACK_EPS; do
+    case ",$sonarr_episodefile_episodeids," in
+        *",$ep,"*) continue ;;
+    esac
+    LATEST_IMPORT=$(curl -sf -H "X-Api-Key: $SONARR_API_KEY" \
+        "$SONARR_URL/api/v3/history?episodeId=$ep&pageSize=50&sortKey=date&sortDir=desc" | jq -r '
+        first(.records[] | select(.eventType == "downloadFolderImported"))
+        | .downloadId // empty' | tr '[:upper:]' '[:lower:]')
+    if [ "$LATEST_IMPORT" = "$OLD_HASH_LC" ]; then
+        log "Old torrent $OLD_HASH_LC is a season pack still used by episode $ep — skipping"
+        exit 0
+    fi
+done
+
+log "Old torrent hash: $OLD_HASH_LC — deleting from qBittorrent"
 
 # Login to qBittorrent
 COOKIEJAR=$(mktemp)
@@ -62,7 +85,7 @@ if ! curl -sf -c "$COOKIEJAR" \
 fi
 
 curl -sf -b "$COOKIEJAR" \
-    --data "hashes=$OLD_HASH&deleteFiles=true" \
+    --data "hashes=$OLD_HASH_LC&deleteFiles=true" \
     "$QB_URL/api/v2/torrents/delete" > /dev/null
 
-log "Deleted torrent $OLD_HASH (with files)"
+log "Deleted torrent $OLD_HASH_LC (with files)"
